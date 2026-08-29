@@ -24,6 +24,7 @@ import json
 import pathlib
 import re
 import sys
+from urllib.parse import parse_qs, unquote, urlparse
 
 import flight
 
@@ -41,8 +42,12 @@ GROUP_HEADER_RE = re.compile(
 )
 # Workplace types stand alone as a "location" line on the detail pages.
 WORKPLACE_TYPES = {"Remote", "On-site", "Hybrid"}
-# "2025 – 2027" on an education row (no "·" tail).
-YEAR_SPAN_RE = re.compile(r"^\d{4}\s*[-–]\s*(?:\d{4}|Present)$")
+# An education row's date span. Bare years ("2025 – 2027") are the common
+# case, but plenty of profiles carry month precision ("Aug 2019 - May 2023"),
+# and matching only the bare form left `years` silently empty for those.
+EDU_DATE_RE = re.compile(
+    r"^(?:\w{3}\s+)?\d{4}\s*[-–]\s*(?:Present|(?:\w{3}\s+)?\d{4})$"
+)
 DEGREE_BADGE_RE = re.compile(r"^·\s*\d+(?:st|nd|rd|th)\+?$")
 EMPLOYMENT_TYPES = {
     "Full-time", "Part-time", "Self-employed", "Freelance", "Contract",
@@ -73,7 +78,7 @@ DROP_PREFIX = (
     "Message ", "state:invitation:",
 )
 # Image path fragments: "400_400/company-logo_400_400/0/…", "scale_100_100/…"
-IMG_FRAGMENT_RE = re.compile(r"^(?:\d+(?:_\d+)?|scale_\d+_\d+|crop_\d+_\d+)/")
+IMG_FRAGMENT_RE = re.compile(r"^(?:\d+(?:_\d+)?|(?:scale|crop|shrink)_\d+_\d+)/")
 # preserveAspectRatio, the one image attribute whose value isn't a bare word:
 # "xMidYMid slice", "xMinYMax meet".
 SVG_ASPECT_RE = re.compile(r"^x(?:Mid|Min|Max)Y(?:Mid|Min|Max)\s+(?:meet|slice)$")
@@ -102,72 +107,146 @@ def clean(texts, vanity: str = "") -> list:
 # -- record shapes --------------------------------------------------------
 
 
+# A value LinkedIn simply doesn't publish is null, not "". Empty strings are
+# reserved for fields that exist and are genuinely blank; empty lists stay [].
 @dataclasses.dataclass
 class Position:
-    title: str = ""
-    company: str = ""
-    company_url: str = ""
-    employment_type: str = ""
-    date_range: str = ""
-    duration: str = ""
-    location: str = ""
-    description: str = ""
+    title: str | None = None
+    company: str | None = None
+    company_url: str | None = None
+    employment_type: str | None = None
+    date_range: str | None = None       # as displayed, "Mar 2026 - Present"
+    start_date: str | None = None       # "2026-03", or "2026" if month-less
+    end_date: str | None = None         # None while the role is current
+    is_current: bool = False
+    duration: str | None = None
+    location: str | None = None
+    description: str | None = None
 
 
 @dataclasses.dataclass
 class Education:
-    school: str = ""
-    school_url: str = ""
-    degree: str = ""
-    years: str = ""
+    school: str | None = None
+    school_url: str | None = None
+    degree: str | None = None
+    years: str | None = None
 
 
 @dataclasses.dataclass
 class Certification:
-    name: str = ""
-    issuer: str = ""
-    issued: str = ""
-    credential_id: str = ""
-    credential_url: str = ""
+    name: str | None = None
+    issuer: str | None = None
+    issued: str | None = None           # as displayed, "Jun 2023"
+    issued_date: str | None = None      # "2023-06"
+    credential_id: str | None = None
+    credential_url: str | None = None
 
 
 @dataclasses.dataclass
 class Profile:
     """Exactly the fields the brief asks for, in the order it lists them."""
 
-    name: str = ""
-    headline: str = ""
-    location: str = ""
-    about: str = ""
+    name: str | None = None
+    headline: str | None = None
+    location: str | None = None
+    about: str | None = None
     experience: list = dataclasses.field(default_factory=list)
     education: list = dataclasses.field(default_factory=list)
     skills: list = dataclasses.field(default_factory=list)
     certifications: list = dataclasses.field(default_factory=list)
     languages: list = dataclasses.field(default_factory=list)
-    profile_photo_url: str = ""
-    cover_photo_url: str = ""
+    # {"url": <the largest rendition>, "renditions": {<width>: url}}.
+    profile_photo: dict | None = None
+    cover_photo: dict | None = None
 
 
-# -- per-card parsers -----------------------------------------------------
+# -- links, dates, images -------------------------------------------------
 
 
-def _first_url(texts, *, contains: str = "", prefix: str = "https://") -> str:
+def unwrap_url(u: str | None) -> str | None:
+    """Undo LinkedIn's outbound-link interstitial.
+
+    Every off-site link is wrapped as
+    ``/safety/go/?url=<escaped>&urlhash=…&isSdui=true``, which is not the
+    credential — it is a redirector, and useless to a consumer. LinkedIn also
+    escapes the dots (``%2Ecoursera%2Eorg``), so the target needs unquoting
+    after it is pulled out of the query string."""
+    if not u or "/safety/go/" not in u:
+        return u
+    target = parse_qs(urlparse(u).query).get("url", [""])[0]
+    return unquote(target) if target else u
+
+
+def _first_url(texts, *, contains: str = "", prefix: str = "https://") -> str | None:
     for t in texts:
         if t.startswith(prefix) and (not contains or contains in t) and " " not in t:
-            return t
-    return ""
+            return unwrap_url(t)
+    return None
 
 
-def _best_image_url(texts, marker: str) -> str:
-    """Images arrive split into a rootUrl and per-size suffixUrls, and also as
-    a pre-joined srcset. Take the longest single URL — that is the joined form
-    — and skip srcsets, which are space-separated lists."""
-    best = ""
-    for t in texts:
-        if t.startswith("https://media.licdn.com/") and marker in t and " " not in t:
-            if len(t) > len(best):
-                best = t
-    return best
+MONTHS = {
+    m: i
+    for i, m in enumerate(
+        ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"),
+        start=1,
+    )
+}
+DATE_POINT_RE = re.compile(r"^(?:(?P<month>[A-Z][a-z]{2})\s+)?(?P<year>\d{4})$")
+
+
+def iso_date(s: str | None) -> str | None:
+    """"Mar 2026" -> "2026-03"; "2020" -> "2020" (LinkedIn published no month);
+    anything else -> None."""
+    m = DATE_POINT_RE.match((s or "").strip())
+    if not m:
+        return None
+    month = MONTHS.get(m.group("month") or "")
+    if m.group("month") and not month:
+        return None
+    return f"{m.group('year')}-{month:02d}" if month else m.group("year")
+
+
+def split_date_range(s: str | None):
+    """"Mar 2026 - Present" -> ("2026-03", None, True). The display string is
+    kept as-is alongside these; this is only so a consumer never has to parse
+    English to sort or filter."""
+    parts = re.split(r"\s*[-–]\s*", (s or "").strip(), maxsplit=1)
+    start = iso_date(parts[0])
+    tail = parts[1].strip() if len(parts) > 1 else ""
+    if tail == "Present":
+        return start, None, True
+    return start, iso_date(tail), False
+
+
+def _photo(node, marker: str, raw_texts) -> dict | None:
+    """One image as its largest rendition plus every size on offer.
+
+    Renditions are keyed by WIDTH, ascending — a profile photo comes back as
+    "100"/"200"/"400"/"800" and a cover as "200"/"350". Keying by the larger
+    edge instead would have a cover's 200x800 answer to "800", which a photo's
+    800x800 also answers to; width is the one number that names a rendition
+    the same way for both. Should LinkedIn ever ship two renditions of equal
+    width, the taller wins the key.
+
+    Falls back to the longest whole URL in the card when the payload doesn't
+    expose the root/suffix split, which is all the old extraction ever saw —
+    and is why the response used to carry the 100px thumbnail."""
+    sizes = flight.image_renditions(node, marker)
+    if not sizes:
+        best = max(
+            (t for t in raw_texts
+             if t.startswith(flight.MEDIA_PREFIX) and marker in t and " " not in t),
+            key=len,
+            default=None,
+        )
+        return {"url": best, "renditions": {}} if best else None
+
+    renditions = {}
+    for w, h in sorted(sizes):  # ascending, so the taller of equal widths wins
+        renditions[str(w)] = sizes[(w, h)]
+    return {"url": sizes[max(sizes, key=lambda wh: wh[0] * wh[1])],
+            "renditions": renditions}
 
 
 def parse_top_card(card, vanity: str) -> dict:
@@ -202,16 +281,54 @@ def parse_top_card(card, vanity: str) -> dict:
         elif len(middle) == 2:
             out["location"] = middle[1]
 
-    out["profile_photo_url"] = _best_image_url(raw, "profile-displayphoto")
-    out["cover_photo_url"] = _best_image_url(raw, "profile-displaybackgroundimage")
+    for field, marker in (
+        ("profile_photo", "profile-displayphoto"),
+        ("cover_photo", "profile-displaybackgroundimage"),
+    ):
+        photo = _photo(card, marker, raw)
+        if photo:
+            out[field] = photo
     return out
 
 
-def parse_about(card, vanity: str) -> str:
-    c = clean(flight.texts(card), vanity)
+# The About *card* is a container: the top-skills widget, the featured and
+# analytics sections are siblings of the text, and a whole-card text sweep
+# swallowed all of them. This is the identifier on the About text's own
+# subtree.
+ABOUT_SECTION = "com.linkedin.sdui.impl.profile.components.aboutSection"
+
+# Where the About text ends and the next widget begins. Everything from the
+# first of these onwards is chrome, so the scan stops rather than filters —
+# the widget's own contents (the skills bullet line) follow it.
+ABOUT_STOP_EXACT = {"Top skills", "Show top skills", "Show all", "Featured"}
+# "Vanshika's top skills" / "Fouad’s top skills" — the widget's heading,
+# which is built from the member's name and so can't be listed literally.
+ABOUT_STOP_RE = re.compile(r"^.{1,80}[’']s top skills$")
+# Button labels that sit inside the text block itself.
+ABOUT_DROP = {"see more", "…see more", "see less", "Show more", "Show less"}
+
+
+def parse_about(card, vanity: str, name: str = "") -> str | None:
+    """The About text, and nothing else that renders next to it.
+
+    Two guards, because either alone leaves debris: scope to the About
+    section's own subtree, then stop at the first widget heading. The name
+    tokens are dropped too — a nested given/family-name component emits
+    "Vanshika" and "Agarwal" as bare strings."""
+    section = flight.find_by_identifier(card, ABOUT_SECTION) or card
+    c = clean(flight.texts(section), vanity)
     if c and c[0] == "About":
         c = c[1:]
-    return "\n\n".join(c)
+
+    name_tokens = set((name or "").split())
+    kept = []
+    for t in c:
+        if t in ABOUT_STOP_EXACT or ABOUT_STOP_RE.match(t):
+            break
+        if t in ABOUT_DROP or t in name_tokens:
+            continue
+        kept.append(t)
+    return "\n\n".join(kept) or None
 
 
 MEDIA_FILE_RE = re.compile(r"\.(?:pdf|docx?|pptx?|png|jpe?g|gif)$", re.I)
@@ -275,7 +392,7 @@ def parse_experience(entities, vanity: str) -> list:
         # Consume the group header: company, "<type> · <total duration>", then
         # any location lines. What follows is the first role's own lead, which
         # must not be mistaken for part of the header.
-        header_end, group_location = 0, ""
+        header_end, group_location = 0, None
         if grouped:
             header_end = 2
             while header_end < starts[0] and _looks_like_location(c[header_end]):
@@ -312,13 +429,14 @@ def parse_experience(entities, vanity: str) -> list:
                 body.append(s)
             body = [s for s in body if s not in lead]
 
-            p = Position(company=group_company, company_url=company_url,
-                         employment_type=group_type)
+            p = Position(company=group_company or None, company_url=company_url,
+                         employment_type=group_type or None)
             p.date_range = c[start]
             if "·" in p.date_range:
                 p.date_range, _, p.duration = (
                     x.strip() for x in p.date_range.partition("·")
                 )
+            p.start_date, p.end_date, p.is_current = split_date_range(p.date_range)
 
             for x in lead:
                 if _is_employment_type(x):
@@ -334,7 +452,7 @@ def parse_experience(entities, vanity: str) -> list:
                 p.location = body[0]
                 body = body[1:]
             p.location = p.location or group_location
-            p.description = "\n".join(body).strip()
+            p.description = "\n".join(body).strip() or None
             positions.append(p)
     return positions
 
@@ -348,7 +466,7 @@ def parse_education(entities, vanity: str) -> list:
         if c:
             e.school = c[0]
         rest = c[1:]
-        years = [x for x in rest if YEAR_SPAN_RE.match(x)]
+        years = [x for x in rest if EDU_DATE_RE.match(x)]
         if years:
             e.years = years[0]
             rest = rest[: rest.index(years[0])]
@@ -367,7 +485,9 @@ def parse_certifications(entities, vanity: str) -> list:
         body = []
         for t in c:
             if t.startswith("Issued "):
-                cert.issued = t
+                # "Issued Jun 2023", sometimes "Issued Jun 2023 · Expires Jun 2025".
+                cert.issued = t[len("Issued ") :]
+                cert.issued_date = iso_date(cert.issued.split("·")[0].strip())
             elif t.startswith("Credential ID "):
                 cert.credential_id = t[len("Credential ID ") :]
             else:
@@ -390,7 +510,9 @@ def parse_simple_list(entities, vanity: str) -> list:
     return out
 
 
-# Cards whose parser needs the whole card, not its entity rows.
+# Cards whose parser needs the whole card, not its entity rows. These take the
+# name too: About renders the member's own name as loose strings beside the
+# text, and the only way to recognise them is to know what it is.
 CARD_TEXT_HANDLERS = {
     "profile-card-about": ("about", parse_about),
 }
@@ -420,7 +542,7 @@ def ingest(p: Profile, tree, vanity: str) -> Profile:
                     setattr(p, k, v)
         elif view_name in CARD_TEXT_HANDLERS:
             field, fn = CARD_TEXT_HANDLERS[view_name]
-            value = fn(card, vanity)
+            value = fn(card, vanity, p.name or "")
             if value:
                 setattr(p, field, value)
         elif view_name in CARD_HANDLERS:
