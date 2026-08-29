@@ -36,7 +36,7 @@ DATE_RANGE_RE = re.compile(
 # Either form on line 2 marks a company group header (one company, many roles).
 DURATION_RE = re.compile(r"^\d+\s+(?:yrs?|mos?)(?:\s+\d+\s+mos?)?$")
 GROUP_HEADER_RE = re.compile(
-    r"^(?:(?P<type>[A-Za-z-]+)\s+·\s+)?"
+    r"^(?:(?P<type>[A-Za-z-]+(?:\s+[A-Za-z-]+)?)\s+·\s+)?"
     r"\d+\s+(?:yrs?|mos?)(?:\s+\d+\s+mos?)?$"
 )
 # Workplace types stand alone as a "location" line on the detail pages.
@@ -46,8 +46,12 @@ YEAR_SPAN_RE = re.compile(r"^\d{4}\s*[-–]\s*(?:\d{4}|Present)$")
 DEGREE_BADGE_RE = re.compile(r"^·\s*\d+(?:st|nd|rd|th)\+?$")
 EMPLOYMENT_TYPES = {
     "Full-time", "Part-time", "Self-employed", "Freelance", "Contract",
-    "Internship", "Apprenticeship", "Seasonal",
+    "Internship", "Apprenticeship", "Seasonal", "Temporary",
 }
+# LinkedIn qualifies the base type on many profiles: "Permanent Full-time",
+# "Contract Full-time". Both halves have to be recognised as one type, or the
+# whole string gets mistaken for a company name.
+EMPLOYMENT_QUALIFIERS = {"Permanent", "Contract", "Temporary", "Seasonal"}
 
 # Presentation tokens and affordance labels that survive flight.texts() but
 # carry no profile data.
@@ -219,6 +223,14 @@ def _is_artifact(s: str, known: set) -> bool:
     return s in known or bool(MEDIA_FILE_RE.search(s)) or bool(SKILL_SUMMARY_RE.search(s))
 
 
+def _is_employment_type(s: str) -> bool:
+    """A bare type ("Freelance") or a qualified one ("Permanent Full-time")."""
+    if s in EMPLOYMENT_TYPES:
+        return True
+    head, _, tail = s.partition(" ")
+    return head in EMPLOYMENT_QUALIFIERS and tail in EMPLOYMENT_TYPES
+
+
 def _looks_like_location(s: str) -> bool:
     """Locations are short and comma-separated, often with a workplace-type
     suffix. Description bullets start with a marker, or run long. On the
@@ -250,7 +262,7 @@ def parse_experience(entities, vanity: str) -> list:
         grouped = bool(m)
         group_company = c[0] if grouped else ""
         group_type = (m.group("type") or "") if grouped else ""
-        if group_type and group_type not in EMPLOYMENT_TYPES:
+        if group_type and not _is_employment_type(group_type):
             group_type = ""
 
         # Consume the group header: company, "<type> · <total duration>", then
@@ -263,11 +275,15 @@ def parse_experience(entities, vanity: str) -> list:
                 group_location = group_location or c[header_end]
                 header_end += 1
 
+        # Title and employment type sit immediately above each date range.
+        # Walk back over at most two lines, stopping at anything that is
+        # clearly description or a trailing affordance. Resolve every role's
+        # lead up front: a role's body runs to where the *next* role's lead
+        # begins, not to the next date range, or it swallows that role's
+        # title and type.
+        leads = []
         for n, start in enumerate(starts):
             floor = starts[n - 1] if n else header_end - 1
-            # Title and employment type sit immediately above the date range.
-            # Walk back over at most two lines, stopping at anything that is
-            # clearly description or a trailing affordance.
             lead = []
             i = start - 1
             while i > floor and len(lead) < 2:
@@ -276,9 +292,14 @@ def parse_experience(entities, vanity: str) -> list:
                     break
                 lead.insert(0, s)
                 i -= 1
+            leads.append((i + 1, lead))
+
+        for n, start in enumerate(starts):
+            lead = leads[n][1]
+            stop = leads[n + 1][0] if n + 1 < len(starts) else len(c)
 
             body = []
-            for s in c[start + 1 : (starts[n + 1] if n + 1 < len(starts) else len(c))]:
+            for s in c[start + 1 : stop]:
                 if _is_artifact(s, known):
                     break  # everything past the first affordance is chrome
                 body.append(s)
@@ -293,9 +314,9 @@ def parse_experience(entities, vanity: str) -> list:
                 )
 
             for x in lead:
-                if x in EMPLOYMENT_TYPES:
+                if _is_employment_type(x):
                     p.employment_type = x
-                elif " · " in x and x.rsplit(" · ", 1)[1] in EMPLOYMENT_TYPES:
+                elif " · " in x and _is_employment_type(x.rsplit(" · ", 1)[1]):
                     p.company, p.employment_type = x.rsplit(" · ", 1)
                 elif not p.title:
                     p.title = x
