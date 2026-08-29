@@ -62,6 +62,9 @@ DROP_EXACT = {
     "circle", "light", "more", "Media", "Endorse", "Show credential",
     "position", "education", "auto", "stretch", "viewLink", "Message",
     "h1", "h2", "h3", "Premium", "Buffer",
+    # <img> attribute values. They render ahead of the row's own text, so on a
+    # certification they land in the name/issuer slots and push the real ones out.
+    "low", "high", "lazy", "eager", "async", "sync", "ghost",
 }
 DROP_PREFIX = (
     "Thumbnail for ", "Skills for ", "Show credential for ", "Endorse ",
@@ -71,6 +74,9 @@ DROP_PREFIX = (
 )
 # Image path fragments: "400_400/company-logo_400_400/0/…", "scale_100_100/…"
 IMG_FRAGMENT_RE = re.compile(r"^(?:\d+(?:_\d+)?|scale_\d+_\d+|crop_\d+_\d+)/")
+# preserveAspectRatio, the one image attribute whose value isn't a bare word:
+# "xMidYMid slice", "xMinYMax meet".
+SVG_ASPECT_RE = re.compile(r"^x(?:Mid|Min|Max)Y(?:Mid|Min|Max)\s+(?:meet|slice)$")
 
 
 def clean(texts, vanity: str = "") -> list:
@@ -86,6 +92,7 @@ def clean(texts, vanity: str = "") -> list:
             or t.startswith(("http://", "https://", "/", "urn:li:"))
             or t.endswith(" logo")
             or IMG_FRAGMENT_RE.match(t)
+            or SVG_ASPECT_RE.match(t)
         ):
             continue
         out.append(t)
