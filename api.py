@@ -8,7 +8,11 @@ Public HTTP API over the LinkedIn scraper.
 Run locally:
     export LI_AT='...'                # the cookie the server scrapes with
     export LINKEDIN_API_KEY='...'     # require this in the X-API-Key header
-    uvicorn api:app --reload
+    uvicorn api:app --reload --no-server-header
+
+(--no-server-header keeps uvicorn from advertising itself in responses; it is
+baked into the Dockerfile CMD, so it only needs passing by hand when running
+uvicorn directly.)
 
 Configuration is entirely environment-driven so the same image runs anywhere:
 

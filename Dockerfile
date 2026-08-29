@@ -18,4 +18,5 @@ USER appuser
 ENV PORT=8080
 EXPOSE 8080
 # Shell form so ${PORT} is expanded by the platform at runtime.
-CMD uvicorn api:app --host 0.0.0.0 --port ${PORT}
+# --no-server-header: don't advertise the server software to callers.
+CMD uvicorn api:app --host 0.0.0.0 --port ${PORT} --no-server-header
