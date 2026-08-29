@@ -1,0 +1,44 @@
+# Render blueprint. Deploy with: New > Blueprint, point at this repo.
+# Everything here is also settable by hand in the dashboard if you'd rather
+# create the service manually.
+services:
+  - type: web
+    name: linkedin-profile-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: oregon
+    healthCheckPath: /health
+    envVars:
+      # Secrets: sync:false means Render prompts for the value at deploy time
+      # and keeps it out of the repo.
+      - key: LI_AT
+        sync: false
+      - key: LINKEDIN_API_KEY
+        sync: false
+      # Match the UA to the browser the LI_AT cookie came from.
+      - key: LI_USER_AGENT
+        sync: false
+
+      # The free plan has no persistent disk, so the cache lives in the
+      # container's ephemeral filesystem: it survives worker restarts but not
+      # a redeploy or a spin-down. Fine for a demo. On a paid plan, attach the
+      # disk below and set this to /var/data/cache.db instead.
+      - key: CACHE_DB
+        value: /tmp/cache.db
+      - key: CACHE_TTL
+        value: "3600"
+      - key: CACHE_SWEEP_SECS
+        value: "300"
+      - key: REQUEST_DELAY
+        value: "0.7"
+      # Lock this down to your frontend's origin before sharing the URL.
+      - key: CORS_ORIGINS
+        value: ""
+
+    # Paid plans only — uncomment together with CACHE_DB=/var/data/cache.db
+    # to keep the cache across redeploys.
+    # disk:
+    #   name: cache
+    #   mountPath: /var/data
+    #   sizeGB: 1

@@ -1,0 +1,10 @@
+{
+  "enabledPlugins": {
+    "chrome-devtools-mcp@chrome-devtools-plugins": true
+  },
+  "permissions": {
+    "allow": [
+      "Bash(.venv/bin/python3)"
+    ]
+  }
+}
