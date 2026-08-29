@@ -317,6 +317,106 @@ def texts(node, depth=0, out=None):
     return out
 
 
+# -- images ---------------------------------------------------------------
+
+MEDIA_PREFIX = "https://media.licdn.com/"
+# A suffixUrl: the per-size tail of a media URL, e.g.
+# "scale_100_100/B4DZ…/0/1785…?e=…&t=…" or "400_400/company-logo_400_400/0/…".
+IMG_SUFFIX_RE = re.compile(r"^(?:\d+(?:_\d+)?|(?:scale|crop|shrink)_\d+_\d+)/")
+# The size token inside a rendition: scale_100_100, crop_800_800, shrink_200_800.
+IMG_SIZE_RE = re.compile(r"(?:scale|crop|shrink)_(\d+)_(\d+)")
+
+
+def _is_image_root(s, marker: str) -> bool:
+    return (
+        isinstance(s, str)
+        and s.startswith(MEDIA_PREFIX)
+        and marker in s
+        and " " not in s  # a srcset is a space-separated list, not a URL
+    )
+
+
+def _strings_under(node, out, depth=0):
+    if depth > 8:
+        return
+    if isinstance(node, str):
+        out.append(node)
+    elif isinstance(node, list):
+        for x in node:
+            _strings_under(x, out, depth + 1)
+    elif isinstance(node, dict):
+        for k, v in node.items():
+            if k not in SKIP_PROPS:
+                _strings_under(v, out, depth + 1)
+
+
+def image_renditions(node, marker: str) -> dict:
+    """Every size LinkedIn offers for one image, keyed by ``(width, height)``.
+
+    Both dimensions are kept because the size token is a width×height pair and
+    the two are not always equal: profile photos are square (``crop_800_800``)
+    but cover photos are not (``shrink_200_800``, ``shrink_350_1400``), so a
+    single number names the rendition ambiguously.
+
+    An image arrives as a ``rootUrl`` plus a list of per-size ``suffixUrls``,
+    each carrying its own signed ``t=`` token — so the sizes cannot be derived
+    by rewriting one URL, they have to be read off the payload and joined. A
+    whole URL is usually present too (the one rendition the page renders), and
+    both forms are folded together here.
+
+    Grouping is per-dict so two images sharing a marker can't be mixed: the
+    deepest group wins, being the tightest scope around a single image.
+    """
+    groups = []
+
+    def walk(n, depth=0):
+        if depth > 300:
+            return
+        if isinstance(n, dict):
+            if any(_is_image_root(v, marker) for v in n.values()):
+                strs = []
+                _strings_under(n, strs)
+                groups.append((depth, strs))
+            for k, v in n.items():
+                if k not in SKIP_PROPS:
+                    walk(v, depth + 1)
+        elif isinstance(n, list):
+            for x in n:
+                walk(x, depth + 1)
+
+    walk(node)
+
+    out = {}
+
+    def add(url):
+        m = IMG_SIZE_RE.search(url)
+        if m:
+            out.setdefault((int(m.group(1)), int(m.group(2))), url)
+
+    for _, strs in sorted(groups, key=lambda g: -g[0]):
+        # The shortest root is the bare prefix the suffixes attach to; a longer
+        # one is an already-joined rendition, which `add` takes as it stands.
+        base = min((s for s in strs if _is_image_root(s, marker)), key=len)
+        for s in strs:
+            if _is_image_root(s, marker):
+                add(s)
+            elif IMG_SUFFIX_RE.match(s):
+                add(base + s)
+    return out
+
+
+def find_by_identifier(node, identifier: str):
+    """The first component tagged with ``identifier`` — LinkedIn's
+    ``observabilityIdentifier``, the one stable name a card's own subtree has.
+    Returns None when the payload doesn't carry it, so callers can fall back
+    to the whole card."""
+
+    def tagged(props) -> bool:
+        return any(v == identifier for v in props.values() if isinstance(v, str))
+
+    return next(find_components(node, tagged), None)
+
+
 # -- pagination -----------------------------------------------------------
 
 PAGINATION_TYPE = "proto.sdui.actions.requests.PaginationRequest"
