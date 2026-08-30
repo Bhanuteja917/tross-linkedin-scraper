@@ -10,6 +10,24 @@ response into one flat `Profile` object served over a small FastAPI app.
 GET /profile?url=williamhgates  ->  { "name": …, "experience": [ … ], … }
 ```
 
+The `url` parameter takes **either a bare vanity slug or a full profile URL** —
+`williamhgates` and `https://www.linkedin.com/in/williamhgates/` are equivalent.
+
+### Live instance
+
+<https://tross-linkedin-scraper.onrender.com/docs#/profile/profile_profile_get>
+
+Deployed on Render's **free plan**, which sleeps an idle service — the first
+request after a quiet period pays a **cold start** and can take a while (tens of
+seconds). Retry, or hit `/health` first to wake it, and subsequent calls are fast.
+
+The server already has a working `li_at` cookie configured. If it ever stops
+working — cookies expire, and LinkedIn can invalidate one used from a different
+IP — the API answers `502`/`503`; in that case supply your own cookie from the
+Swagger page: paste it into the **`X-LI-AT`** header field on `GET /profile`
+(pair it with `X-LI-User-Agent` set to the UA of the browser that cookie came
+from). See [The cookie](#the-cookie) for where to find `li_at`.
+
 | Module | Role |
 |---|---|
 | [`linkedin_client.py`](linkedin_client.py) | Transport — an authenticated `requests` session, plus a CLI |
@@ -106,11 +124,23 @@ All environment-driven, so the same image runs anywhere.
 | `X-LI-AT` | header | bring-your-own cookie; overrides the server's |
 | `X-LI-User-Agent` | header | UA to pair with that cookie |
 
+`url` accepts a full profile URL or a bare vanity slug — both forms resolve to
+the same profile and share a cache entry.
+
 Responses carry `X-Cache: HIT` or `MISS`.
 
 ```bash
+# local
 curl -H 'X-API-Key: choose-one' \
      'http://127.0.0.1:8000/profile?url=https://www.linkedin.com/in/williamhgates/'
+
+# live instance (slug form) — first call may cold-start
+curl 'https://tross-linkedin-scraper.onrender.com/profile?url=williamhgates'
+
+# bring your own cookie, if the server's has expired
+curl -H 'X-LI-AT: <your li_at>' \
+     -H 'X-LI-User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) …' \
+     'https://tross-linkedin-scraper.onrender.com/profile?url=williamhgates'
 ```
 
 | Status | When |
