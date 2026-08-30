@@ -150,7 +150,6 @@ async def health():
         "cache_ttl_seconds": CACHE_TTL,
         "cache_db": CACHE_DB,
         "last_success_at": _last_success_at,
-        "impersonate": lc.IMPERSONATE,
     }
 
 
@@ -207,7 +206,7 @@ async def profile(
             if cached is not None:
                 return JSONResponse(cached, headers={"X-Cache": "HIT"})
         try:
-            # curl_cffi is synchronous; keep it off the event loop.
+            # requests is synchronous; keep it off the event loop.
             result = await asyncio.to_thread(
                 lc.scrape, slug, li_at, user_agent, None, None, REQUEST_DELAY
             )

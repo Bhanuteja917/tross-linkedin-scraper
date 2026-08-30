@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LinkedIn profile scraper: fetch with curl_cffi, parse the SDUI/Flight payload,
+LinkedIn profile scraper: fetch with requests, parse the SDUI/Flight payload,
 emit flat JSON.
 
     export LI_AT='your-li-at-cookie'
@@ -12,16 +12,9 @@ emit flat JSON.
 Raw responses are saved only when --dump is passed (or a dump_dir is given to
 scrape()), for offline debugging. The API never saves them.
 
-WHY curl_cffi:
-    Plain HTTP clients (urllib, requests, Go net/http, Postman) get HTTP 999
-    from LinkedIn even with a valid li_at cookie and perfect headers. The block
-    happens at the TLS handshake — LinkedIn fingerprints the JA3 signature
-    before it reads a single header. curl_cffi wraps curl-impersonate, which
-    reproduces Chrome's actual TLS/JA3 signature, so the connection looks like
-    Chrome at the transport layer.
-
-    This is still a plain HTTP client — no browser, no Chromium, no automation
-    framework — so it satisfies the "no browser" requirement.
+This is a plain HTTP client — no browser, no Chromium, no automation
+framework — so it satisfies the "no browser" requirement. The li_at cookie is
+what unlocks the member view; see FINDINGS.md for the measurements.
 """
 
 import argparse
@@ -35,14 +28,10 @@ import re
 import sys
 import time
 
-from curl_cffi import requests
+import requests
 
 import flight
 import linkedin_profile as profile
-
-# Chrome build to impersonate at the TLS layer. Keep this close to the UA you
-# send — a Chrome 151 UA over a Firefox TLS fingerprint is itself a signal.
-IMPERSONATE = os.environ.get("LI_IMPERSONATE", "chrome150")
 
 # Fallback UA. Override via LI_USER_AGENT to match the browser your li_at came
 # from — LinkedIn checks the UA against the cookie's origin session.
@@ -105,12 +94,23 @@ class LinkedInClient:
         if not li_at:
             raise RuntimeError("LI_AT is required")
         self.user_agent = user_agent
-        self.session = requests.Session(impersonate=IMPERSONATE)
+        self.session = requests.Session()
         self.session.cookies.set("li_at", li_at, domain=".linkedin.com")
         self.csrf_token = None
         self.dump_dir = dump_dir
         self._dump_seq = 0
         self.last_dump = None
+
+    @staticmethod
+    def _utf8(response):
+        """LinkedIn serves UTF-8 but omits the charset from Content-Type, and
+        requests then falls back to ISO-8859-1 for text/* — which turns every
+        "·" separator into mojibake and breaks the date-range parsing."""
+        if not response.encoding or "charset" not in (
+            response.headers.get("Content-Type", "").lower()
+        ):
+            response.encoding = "utf-8"
+        return response.text
 
     # -- raw response capture ---------------------------------------------
 
@@ -132,7 +132,6 @@ class LinkedInClient:
         meta = {
             "label": label,
             "fetched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "impersonate": IMPERSONATE,
             "request": {
                 "method": getattr(req, "method", None),
                 "url": str(response.url),
@@ -167,13 +166,13 @@ class LinkedInClient:
         self.dump(label, r, "html")
         if r.status_code == 999:
             raise RuntimeError(
-                "HTTP 999 — LinkedIn blocked the request. If Chrome works but this "
-                "doesn't, try a different LI_IMPERSONATE value (e.g. chrome146, "
-                "chrome142). If Chrome is also blocked, wait before retrying."
+                "HTTP 999 — LinkedIn blocked the request. Wait before retrying, "
+                "and check that LI_AT is valid and LI_USER_AGENT matches the "
+                "browser the cookie came from."
             )
         r.raise_for_status()
 
-        html = r.text
+        html = self._utf8(r)
         if "authwall" in html or "Sign in to LinkedIn" in html:
             raise RuntimeError(
                 "Got the auth wall — li_at is invalid/expired, or the User-Agent "
@@ -219,7 +218,7 @@ class LinkedInClient:
         )
         self.dump(label or component, r, "txt")
         r.raise_for_status()
-        return r.text
+        return self._utf8(r)
 
     def fetch_pagination(
         self, vanity: str, request: dict, screen_id: str, start: int, count: int, label: str
@@ -268,7 +267,7 @@ class LinkedInClient:
         )
         self.dump(f"{label.replace('/', '_')}_page{start}", r, "txt")
         r.raise_for_status()
-        return r.text
+        return self._utf8(r)
 
 
 # -- end-to-end scrape ----------------------------------------------------

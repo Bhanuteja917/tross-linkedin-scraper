@@ -12,7 +12,7 @@ GET /profile?url=williamhgates  ->  { "name": …, "experience": [ … ], … }
 
 | Module | Role |
 |---|---|
-| [`linkedin_client.py`](linkedin_client.py) | Transport — `curl_cffi` with Chrome TLS impersonation, plus a CLI |
+| [`linkedin_client.py`](linkedin_client.py) | Transport — an authenticated `requests` session, plus a CLI |
 | [`flight.py`](flight.py) | Decoder — RSC/Flight wire-format parser |
 | [`linkedin_profile.py`](linkedin_profile.py) | Mapper — component trees → flat fields |
 | [`cache.py`](cache.py) | SQLite TTL cache |
@@ -85,7 +85,6 @@ All environment-driven, so the same image runs anywhere.
 |---|---|---|
 | `LI_AT` | — | cookie used when the caller doesn't supply one |
 | `LI_USER_AGENT` | a Chrome 151 UA | must match the browser the cookie came from |
-| `LI_IMPERSONATE` | `chrome150` | curl-impersonate TLS profile |
 | `LINKEDIN_API_KEY` | *unset* | if set, callers must send `X-API-Key`; **if unset the endpoint is open** |
 | `CACHE_TTL` | `3600` | seconds to cache a parsed profile; `0` disables |
 | `CACHE_DB` | `./cache.db` | SQLite cache file — mount a volume to persist it |
@@ -126,7 +125,7 @@ curl -H 'X-API-Key: choose-one' \
 ### `GET /health`
 
 Liveness plus a config summary: whether a cookie and an API key are configured,
-cache size and TTL, the last successful upstream fetch, the impersonation profile.
+cache size and TTL, and the last successful upstream fetch.
 
 ### Output shape (11 fields)
 
@@ -193,16 +192,14 @@ field — these are reproduced as they appear rather than reconciled. A field is
 
 ## Approach
 
-### Why `curl_cffi` and not requests / urllib
+### Why a plain HTTP client
 
-A plain HTTP client gets **HTTP 999** from LinkedIn even with a valid `li_at`
-cookie and perfect headers. The block happens *at the TLS handshake* — LinkedIn
-fingerprints the JA3 signature before reading a single header. `curl_cffi` wraps
-curl-impersonate and reproduces Chrome's real TLS/JA3 signature, so the
-connection looks like Chrome at the transport layer.
+The requirement was "no browser", so the transport is `requests` with a real
+`li_at` cookie and Chrome-consistent headers. LinkedIn's profile page is
+server-rendered as an RSC/Flight stream, so everything needed is in the
+response body — there is nothing to execute, and no headless browser to run.
 
-This is still a plain HTTP client — no Chromium, no automation framework — so it
-satisfies the "no browser" constraint.
+The cookie is what unlocks the member view. Measured against a live session
 
 ### Authentication
 
@@ -323,16 +320,18 @@ per-dict so two images sharing a URL marker can't be mixed.
   box. Expired rows are dropped lazily on read and swept on a timer.
 - A per-slug `asyncio.Lock` collapses a burst of duplicate requests into one
   upstream scrape.
-- `curl_cffi` is synchronous, so `scrape` runs off the event loop via
+- `requests` is synchronous, so `scrape` runs off the event loop via
   `asyncio.to_thread`.
 
 ---
 
 ## Known limitations
 
-- **Needs a real member cookie.** No `li_at`, no data. Cookies expire, and a
-  cookie used from a very different IP or UA than it was issued to can be
-  invalidated — the API surfaces that as `502`.
+- **Needs a real member cookie.** No `li_at`, no data — and "no data" can arrive
+  as a plausible-looking `HTTP 200`: logged out, LinkedIn serves a crawler page
+  with job titles and past employers asterisk-masked and no RSC stream. Cookies
+  expire, and one used from a very different IP or UA than it was issued to can
+  be invalidated — the API surfaces that as `502`.
 - **Unofficial and undocumented.** These are LinkedIn's internal SDUI endpoints,
   not a public API. Payload shapes can change without notice; a redesign of the
   About card or a renamed `observabilityIdentifier` breaks a field, not the

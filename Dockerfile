@@ -5,7 +5,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 FROM python:3.12-slim
-# curl_cffi ships its own curl-impersonate binary; no system curl needed.
+# Pure-Python deps only; no system libraries needed at runtime.
 RUN useradd --create-home --uid 10001 appuser
 WORKDIR /app
 COPY --from=build /install /usr/local
